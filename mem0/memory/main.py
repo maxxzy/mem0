@@ -9,7 +9,7 @@ import uuid
 import warnings
 from copy import deepcopy
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 import pytz
 from pydantic import ValidationError
@@ -766,6 +766,7 @@ class Memory(MemoryBase):
         filters: Optional[Dict[str, Any]] = None,
         threshold: Optional[float] = None,
         rerank: bool = True,
+        topics: Optional[List[str]] = None,
     ):
         """
         Searches for memories based on a query
@@ -799,6 +800,12 @@ class Memory(MemoryBase):
                   and potentially "relations" if graph store is enabled.
                   Example for v1.1+: `{"results": [{"id": "...", "memory": "...", "score": 0.8, ...}]}`
         """
+
+        if topics:
+            if filters is None:
+                filters = {}
+            filters["topics"] = {"in": topics}
+
         _, effective_filters = _build_filters_and_metadata(
             user_id=user_id, agent_id=agent_id, run_id=run_id, input_filters=filters
         )
@@ -1816,6 +1823,7 @@ class AsyncMemory(MemoryBase):
         threshold: Optional[float] = None,
         metadata_filters: Optional[Dict[str, Any]] = None,
         rerank: bool = True,
+        topics: Optional[List[str]] = None,
     ):
         """
         Searches for memories based on a query
@@ -1849,6 +1857,10 @@ class AsyncMemory(MemoryBase):
                   and potentially "relations" if graph store is enabled.
                   Example for v1.1+: `{"results": [{"id": "...", "memory": "...", "score": 0.8, ...}]}`
         """
+        if topics:
+            if filters is None:
+                filters = {}
+            filters["topics"] = {"in": topics}
 
         _, effective_filters = _build_filters_and_metadata(
             user_id=user_id, agent_id=agent_id, run_id=run_id, input_filters=filters
