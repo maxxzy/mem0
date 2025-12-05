@@ -12,6 +12,8 @@ from qdrant_client.models import (
     PointStruct,
     Range,
     VectorParams,
+    MatchAny,
+    MatchText,
 )
 
 from mem0.vector_stores.base import VectorStoreBase
@@ -148,16 +150,38 @@ class Qdrant(VectorStoreBase):
         Returns:
             Filter: The created Filter object.
         """
-        if not filters:
-            return None
-            
-        conditions = []
+        must_conditions = []
+
         for key, value in filters.items():
-            if isinstance(value, dict) and "gte" in value and "lte" in value:
-                conditions.append(FieldCondition(key=key, range=Range(gte=value["gte"], lte=value["lte"])))
+            if key in ("AND", "OR", "NOT", "$or", "$not"):
+                continue
+
+            if value == "*":
+                continue
+
+            if isinstance(value, dict):
+                if "in" in value:
+                    vals = value["in"]
+                    if not isinstance(vals, list):
+                        vals = [vals]
+                    must_conditions.append(FieldCondition(key=key, match=MatchAny(any=vals)))
+                    continue
+
+                if "contains" in value:
+                    must_conditions.append(FieldCondition(key=key, match=MatchText(text=value["contains"])))
+                    continue
+                if "icontains" in value:
+                    must_conditions.append(FieldCondition(key=key, match=MatchText(text=value["icontains"])))
+                    continue
+
+                unsupported_ops = set(value.keys()) - {"in", "contains", "icontains"}
+                if unsupported_ops:
+                    raise ValueError(f"Unsupported operators for Qdrant payload filter on '{key}': {unsupported_ops}")
+
             else:
-                conditions.append(FieldCondition(key=key, match=MatchValue(value=value)))
-        return Filter(must=conditions) if conditions else None
+                must_conditions.append(FieldCondition(key=key, match=MatchValue(value=value)))
+
+        return Filter(must=must_conditions)
 
     def search(self, query: str, vectors: list, limit: int = 5, filters: dict = None) -> list:
         """
