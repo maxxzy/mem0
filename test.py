@@ -13,6 +13,14 @@ config = {
             "temperature": 0.2,
             "max_tokens": 2000,
         }
+    },
+    "vector_store": {
+        "provider": "qdrant",
+        "config": {
+            "collection_name": "test",
+            "host": "localhost",
+            "port": 6333,
+        }
     }
 }
 

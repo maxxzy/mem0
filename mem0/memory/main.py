@@ -41,6 +41,9 @@ from mem0.utils.factory import (
     RerankerFactory,
 )
 
+import numpy as np
+from mem0.memory.topic_manager import TopicManager
+
 # Suppress SWIG deprecation warnings globally
 warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*SwigPy.*")
 warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*swigvarlink.*")
@@ -187,6 +190,10 @@ class Memory(MemoryBase):
         self.db = SQLiteManager(self.config.history_db_path)
         self.collection_name = self.config.vector_store.config.collection_name
         self.api_version = self.config.version
+        self.topic_manager = TopicManager(
+            savePath=os.path.join(mem0_dir, "topics.json"),
+            embeddingDim=self.config.vector_store.config.get("embedding_model_dims", 1536),
+        )
         
         # Initialize reranker if configured
         self.reranker = None
@@ -277,6 +284,19 @@ class Memory(MemoryBase):
         
         # Use agent memory extraction if agent_id is present and there are assistant messages
         return has_agent_id and has_assistant_messages
+
+    def _build_topic_embeddings(self, topics: list[str]) -> dict[str, np.ndarray]:
+        topic_embs: dict[str, np.ndarray] = {}
+        for t in topics:
+            vec = self.embedding_model.embed(t, memory_action="add")
+            emb = np.asarray(vec, dtype=np.float32)
+            topic_embs[t] = emb
+        return topic_embs
+
+    def _build_query_embedding(self, query_text: str) -> np.ndarray:
+        vec = self.embedding_model.embed(query_text, memory_action="search")
+        query_emb = np.asarray(vec, dtype=np.float32)
+        return query_emb
 
     def add(
         self,
@@ -408,6 +428,8 @@ class Memory(MemoryBase):
                 msg_content = message_dict["content"]
                 msg_embeddings = self.embedding_model.embed(msg_content, "add")
                 mem_id = self._create_memory(msg_content, msg_embeddings, per_msg_meta)
+                if metadata.get("topics"):
+                    self.topic_manager.assign_memory_to_topic(mem_id, metadata["topics"], self._build_topic_embeddings(metadata["topics"]))
 
                 returned_memories.append(
                     {
@@ -429,7 +451,7 @@ class Memory(MemoryBase):
             # Determine if this should use agent memory extraction based on agent_id presence
             # and role types in messages
             is_agent_memory = self._should_use_agent_memory_extraction(messages, metadata)
-            system_prompt, user_prompt = get_fact_retrieval_messages(parsed_messages, is_agent_memory)
+            system_prompt, user_prompt = get_fact_retrieval_messages(parsed_messages, is_agent_memory) # todo: generate topics by LLM
 
         response = self.llm.generate_response(
             messages=[
@@ -801,10 +823,8 @@ class Memory(MemoryBase):
                   Example for v1.1+: `{"results": [{"id": "...", "memory": "...", "score": 0.8, ...}]}`
         """
 
-        if topics:
-            if filters is None:
-                filters = {}
-            filters["topics"] = {"in": topics}
+        related_topics = self.topic_manager.get_relevant_topics(query_topics=topics or [], query_embedding=self._build_query_embedding(self, query))
+        topic_mem_ids = self.topic_manager.get_memory_ids_for_topics(related_topics)
 
         _, effective_filters = _build_filters_and_metadata(
             user_id=user_id, agent_id=agent_id, run_id=run_id, input_filters=filters
@@ -837,7 +857,7 @@ class Memory(MemoryBase):
         )
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            future_memories = executor.submit(self._search_vector_store, query, effective_filters, limit, threshold)
+            future_memories = executor.submit(self._search_vector_store, query, effective_filters, limit, threshold, topic_mem_ids)
             future_graph_entities = (
                 executor.submit(self.graph.search, query, effective_filters, limit) if self.enable_graph else None
             )
@@ -958,9 +978,9 @@ class Memory(MemoryBase):
                 return True
         return False
 
-    def _search_vector_store(self, query, filters, limit, threshold: Optional[float] = None):
+    def _search_vector_store(self, query, filters, limit, threshold: Optional[float] = None, candidate_ids: Optional[list[str]] = None):
         embeddings = self.embedding_model.embed(query, "search")
-        memories = self.vector_store.search(query=query, vectors=embeddings, limit=limit, filters=filters)
+        memories = self.vector_store.search(query=query, vectors=embeddings, limit=limit, filters=filters, candidate_ids=candidate_ids)
 
         promoted_payload_keys = [
             "user_id",
@@ -1105,6 +1125,9 @@ class Memory(MemoryBase):
             actor_id=metadata.get("actor_id"),
             role=metadata.get("role"),
         )
+        if metadata.get("topics"):
+            self.topic_manager.assign_memory_to_topic(memory_id, metadata["topics"],
+                                                      self._build_topic_embeddings(metadata["topics"]))
         return memory_id
 
     def _create_procedural_memory(self, messages, metadata=None, prompt=None):
@@ -1175,6 +1198,8 @@ class Memory(MemoryBase):
             new_metadata["actor_id"] = existing_memory.payload["actor_id"]
         if "role" not in new_metadata and "role" in existing_memory.payload:
             new_metadata["role"] = existing_memory.payload["role"]
+        if "topics" not in new_metadata and "topics" in existing_memory.payload:
+            new_metadata["topics"] = existing_memory.payload["topics"]
 
         if data in existing_embeddings:
             embeddings = existing_embeddings[data]
@@ -1187,6 +1212,10 @@ class Memory(MemoryBase):
             payload=new_metadata,
         )
         logger.info(f"Updating memory with ID {memory_id=} with {data=}")
+
+        if "topics" in new_metadata:
+            self.topic_manager.update_topic_by_mem_id(memory_id, new_metadata["topics"],
+                                                      self._build_topic_embeddings(new_metadata["topics"]))
 
         self.db.add_history(
             memory_id,
@@ -1205,6 +1234,7 @@ class Memory(MemoryBase):
         existing_memory = self.vector_store.get(vector_id=memory_id)
         prev_value = existing_memory.payload.get("data", "")
         self.vector_store.delete(vector_id=memory_id)
+        self.topic_manager.delete_memory(memory_id)
         self.db.add_history(
             memory_id,
             prev_value,
@@ -1261,6 +1291,10 @@ class AsyncMemory(MemoryBase):
         self.db = SQLiteManager(self.config.history_db_path)
         self.collection_name = self.config.vector_store.config.collection_name
         self.api_version = self.config.version
+        self.topic_manager = TopicManager(
+            savePath=os.path.join(mem0_dir, "topics.json"),
+            embeddingDim=self.config.vector_store.config.get("embedding_model_dims", 1536),
+        )
         
         # Initialize reranker if configured
         self.reranker = None
@@ -1334,6 +1368,19 @@ class AsyncMemory(MemoryBase):
         
         # Use agent memory extraction if agent_id is present and there are assistant messages
         return has_agent_id and has_assistant_messages
+
+    def _build_topic_embeddings(self, topics: list[str]) -> dict[str, np.ndarray]:
+        topic_embs: dict[str, np.ndarray] = {}
+        for t in topics:
+            vec = self.embedding_model.embed(t, memory_action="add")
+            emb = np.asarray(vec, dtype=np.float32)
+            topic_embs[t] = emb
+        return topic_embs
+
+    def _build_query_embedding(self, query_text: str) -> np.ndarray:
+        vec = self.embedding_model.embed(query_text, memory_action="search")
+        query_emb = np.asarray(vec, dtype=np.float32)
+        return query_emb
 
     async def add(
         self,
@@ -1857,10 +1904,9 @@ class AsyncMemory(MemoryBase):
                   and potentially "relations" if graph store is enabled.
                   Example for v1.1+: `{"results": [{"id": "...", "memory": "...", "score": 0.8, ...}]}`
         """
-        if topics:
-            if filters is None:
-                filters = {}
-            filters["topics"] = {"in": topics}
+
+        related_topics = self.topic_manager.get_relevant_topics(query_topics=topics or [], query_embedding=self._build_query_embedding(self, query))
+        topic_mem_ids = self.topic_manager.get_memory_ids_for_topics(related_topics)
 
         _, effective_filters = _build_filters_and_metadata(
             user_id=user_id, agent_id=agent_id, run_id=run_id, input_filters=filters
@@ -1892,7 +1938,7 @@ class AsyncMemory(MemoryBase):
             },
         )
 
-        vector_store_task = asyncio.create_task(self._search_vector_store(query, effective_filters, limit, threshold))
+        vector_store_task = asyncio.create_task(self._search_vector_store(query, effective_filters, limit, threshold, topic_mem_ids))
 
         graph_task = None
         if self.enable_graph:
@@ -2019,10 +2065,10 @@ class AsyncMemory(MemoryBase):
                 return True
         return False
 
-    async def _search_vector_store(self, query, filters, limit, threshold: Optional[float] = None):
+    async def _search_vector_store(self, query, filters, limit, threshold: Optional[float] = None, candidate_ids: Optional[list[str]] = None):
         embeddings = await asyncio.to_thread(self.embedding_model.embed, query, "search")
         memories = await asyncio.to_thread(
-            self.vector_store.search, query=query, vectors=embeddings, limit=limit, filters=filters
+            self.vector_store.search, query=query, vectors=embeddings, limit=limit, filters=filters, candidate_ids = candidate_ids
         )
 
         promoted_payload_keys = [
@@ -2176,6 +2222,16 @@ class AsyncMemory(MemoryBase):
             role=metadata.get("role"),
         )
 
+        await asyncio.to_thread(
+            self.topic_manager.assign_memory_to_topic,
+            memory_id,
+            metadata["topics"],
+            self._build_topic_embeddings(metadata["topics"]),
+        )
+
+        if metadata.get("topics"):
+            self.topic_manager.assign_memory_to_topic(memory_id, metadata["topics"], self._build_topic_embeddings(metadata["topics"]))
+
         return memory_id
 
     async def _create_procedural_memory(self, messages, metadata=None, llm=None, prompt=None):
@@ -2261,6 +2317,15 @@ class AsyncMemory(MemoryBase):
             new_metadata["actor_id"] = existing_memory.payload["actor_id"]
         if "role" not in new_metadata and "role" in existing_memory.payload:
             new_metadata["role"] = existing_memory.payload["role"]
+        if "topics" not in new_metadata and "topics" in existing_memory.payload:
+            new_metadata["topics"] = existing_memory.payload["topics"]
+        if "topics" in new_metadata:
+            await asyncio.to_thread(
+                self.topic_manager.update_topic_by_mem_id,
+                memory_id,
+                new_metadata["topics"],
+                self._build_topic_embeddings(new_metadata["topics"])
+            )
 
         if data in existing_embeddings:
             embeddings = existing_embeddings[data]
@@ -2294,6 +2359,7 @@ class AsyncMemory(MemoryBase):
         prev_value = existing_memory.payload.get("data", "")
 
         await asyncio.to_thread(self.vector_store.delete, vector_id=memory_id)
+        await asyncio.to_thread(self.topic_manager.delete_memory, memory_id)
         await asyncio.to_thread(
             self.db.add_history,
             memory_id,
