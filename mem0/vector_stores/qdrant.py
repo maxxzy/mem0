@@ -14,6 +14,7 @@ from qdrant_client.models import (
     VectorParams,
     MatchAny,
     MatchText,
+    HasIdCondition,
 )
 
 from mem0.vector_stores.base import VectorStoreBase
@@ -183,7 +184,7 @@ class Qdrant(VectorStoreBase):
 
         return Filter(must=must_conditions)
 
-    def search(self, query: str, vectors: list, limit: int = 5, filters: dict = None) -> list:
+    def search(self, query: str, vectors: list, limit: int = 5, filters: dict = None, candidate_ids: list = None) -> list:
         """
         Search for similar vectors.
 
@@ -197,6 +198,14 @@ class Qdrant(VectorStoreBase):
             list: Search results.
         """
         query_filter = self._create_filter(filters) if filters else None
+
+        if candidate_ids:
+            has_id = HasIdCondition(has_id=candidate_ids)
+            if query_filter:
+                query_filter.must = (query_filter.must or []) + [has_id]
+            else:
+                query_filter = Filter(must=[has_id])
+
         hits = self.client.query_points(
             collection_name=self.collection_name,
             query=vectors,
