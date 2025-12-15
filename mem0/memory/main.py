@@ -192,7 +192,7 @@ class Memory(MemoryBase):
         self.api_version = self.config.version
         self.topic_manager = TopicManager(
             savePath=os.path.join(mem0_dir, "topics.json"),
-            embeddingDim=self.config.vector_store.config.get("embedding_model_dims", 1536),
+            embeddingDim=getattr(self.config.vector_store.config, "embedding_model_dims", 1536),
         )
         
         # Initialize reranker if configured
@@ -465,17 +465,47 @@ class Memory(MemoryBase):
             response = remove_code_blocks(response)
             if not response.strip():
                 new_retrieved_facts = []
+                new_topics = []
             else:
                 try:
-                    # First try direct JSON parsing
-                    new_retrieved_facts = json.loads(response)["facts"]
+                    parsed_obj = json.loads(response)
                 except json.JSONDecodeError:
-                    # Try extracting JSON from response using built-in function
                     extracted_json = extract_json(response)
-                    new_retrieved_facts = json.loads(extracted_json)["facts"]
+                    parsed_obj = json.loads(extracted_json)
+                new_retrieved_facts = parsed_obj.get("facts", [])
+                new_topics = parsed_obj.get("topics", [])
         except Exception as e:
-            logger.error(f"Error in new_retrieved_facts: {e}")
+            logger.error(f"Error parsing LLM JSON: {e}")
             new_retrieved_facts = []
+            new_topics = []
+
+        if "new_topics" in locals() and new_topics:
+            try:
+                existing_topics = metadata.get("topics", [])
+                if not isinstance(existing_topics, list):
+                    existing_topics = []
+
+                merged: list[str] = []
+                seen = set()
+
+                for t in existing_topics:
+                    if isinstance(t, str):
+                        s = t.strip()
+                        if s and s not in seen:
+                            merged.append(s)
+                            seen.add(s)
+
+                for t in new_topics:
+                    if isinstance(t, str):
+                        s = t.strip()
+                        if s and s not in seen:
+                            merged.append(s)
+                            seen.add(s)
+
+                if merged:
+                    metadata["topics"] = merged
+            except Exception:
+                pass
 
         if not new_retrieved_facts:
             logger.debug("No new facts retrieved from input. Skipping memory update LLM call.")
@@ -823,7 +853,7 @@ class Memory(MemoryBase):
                   Example for v1.1+: `{"results": [{"id": "...", "memory": "...", "score": 0.8, ...}]}`
         """
 
-        related_topics = self.topic_manager.get_relevant_topics(query_topics=topics or [], query_embedding=self._build_query_embedding(self, query))
+        related_topics = self.topic_manager.get_relevant_topics(query_topics=topics or [], query_embedding=self._build_query_embedding(query))
         topic_mem_ids = self.topic_manager.get_memory_ids_for_topics(related_topics)
 
         _, effective_filters = _build_filters_and_metadata(
@@ -1293,7 +1323,7 @@ class AsyncMemory(MemoryBase):
         self.api_version = self.config.version
         self.topic_manager = TopicManager(
             savePath=os.path.join(mem0_dir, "topics.json"),
-            embeddingDim=self.config.vector_store.config.get("embedding_model_dims", 1536),
+            embeddingDim=getattr(self.config.vector_store.config, "embedding_model_dims", 1536),
         )
         
         # Initialize reranker if configured
@@ -1523,17 +1553,48 @@ class AsyncMemory(MemoryBase):
             response = remove_code_blocks(response)
             if not response.strip():
                 new_retrieved_facts = []
+                new_topics = []
             else:
                 try:
-                    # First try direct JSON parsing
-                    new_retrieved_facts = json.loads(response)["facts"]
+                    parsed_obj = json.loads(response)
                 except json.JSONDecodeError:
-                    # Try extracting JSON from response using built-in function
                     extracted_json = extract_json(response)
-                    new_retrieved_facts = json.loads(extracted_json)["facts"]
+                    parsed_obj = json.loads(extracted_json)
+                new_retrieved_facts = parsed_obj.get("facts", [])
+                new_topics = parsed_obj.get("topics", [])
         except Exception as e:
-            logger.error(f"Error in new_retrieved_facts: {e}")
+            logger.error(f"Error parsing LLM JSON: {e}")
             new_retrieved_facts = []
+            new_topics = []
+
+
+        if "new_topics" in locals() and new_topics:
+            try:
+                existing_topics = metadata.get("topics", [])
+                if not isinstance(existing_topics, list):
+                    existing_topics = []
+
+                merged: list[str] = []
+                seen = set()
+
+                for t in existing_topics:
+                    if isinstance(t, str):
+                        s = t.strip()
+                        if s and s not in seen:
+                            merged.append(s)
+                            seen.add(s)
+
+                for t in new_topics:
+                    if isinstance(t, str):
+                        s = t.strip()
+                        if s and s not in seen:
+                            merged.append(s)
+                            seen.add(s)
+
+                if merged:
+                    metadata["topics"] = merged
+            except Exception:
+                pass
 
         if not new_retrieved_facts:
             logger.debug("No new facts retrieved from input. Skipping memory update LLM call.")
@@ -1905,7 +1966,7 @@ class AsyncMemory(MemoryBase):
                   Example for v1.1+: `{"results": [{"id": "...", "memory": "...", "score": 0.8, ...}]}`
         """
 
-        related_topics = self.topic_manager.get_relevant_topics(query_topics=topics or [], query_embedding=self._build_query_embedding(self, query))
+        related_topics = self.topic_manager.get_relevant_topics(query_topics=topics or [], query_embedding=self._build_query_embedding(query))
         topic_mem_ids = self.topic_manager.get_memory_ids_for_topics(related_topics)
 
         _, effective_filters = _build_filters_and_metadata(

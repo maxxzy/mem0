@@ -200,7 +200,7 @@ class Qdrant(VectorStoreBase):
         query_filter = self._create_filter(filters) if filters else None
 
         if candidate_ids:
-            has_id = HasIdCondition(has_id=PointIdsList(points=candidate_ids))
+            has_id = HasIdCondition(has_id=candidate_ids)
             if query_filter:
                 query_filter.must = (query_filter.must or []) + [has_id]
             else:
